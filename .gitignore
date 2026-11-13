@@ -1,0 +1,9 @@
+# Never commit these
+secrets.yaml
+*.bin
+*.elf
+*secrets*/
+.esphome/
+__pycache__/
+*.pyc
+.env*

@@ -1,0 +1,191 @@
+# Seeed XIAO ESP32-C3 — passive Maytag MGD7230HW3 WIN-bus capture tool. Added 2026-11-06.
+# RX-only tap on the RIGEL comm module's WIN UART (module pin 25 = ACU->module,
+# pin 24 = module->ACU). Never drives the bus: no TX pins are configured.
+# Purpose: one live capture to pin baud/framing/CRC/KVP ids (see
+# docs/win-bus-protocol.md). Hex frames go to the log; the ESPHome HA
+# integration forwards device logs into home-assistant.log for analysis.
+#
+# Wiring (XIAO pin -> dryer module):
+#   D7 / GPIO20  <- pin 25 (ACU->module)        UART "acu"
+#   D6 / GPIO21  <- pin 24 (module->ACU)        UART "mod"
+#   D2 / GPIO4   <- pin 25 too (jumper to D7)    edge timer for baud estimate
+#   GND          <- module GND
+# Power from a USB power bank or isolated wall charger, never a PC while the dryer is live.
+
+substitutions:
+  default_baud: "19200"
+
+esphome:
+  name: maytag-win-sniffer
+  friendly_name: Maytag WIN Sniffer
+  on_boot:
+    priority: -100
+    then:
+      - lambda: |-
+          gpio_config_t c = {};
+          c.pin_bit_mask = 1ULL << 4;
+          c.mode = GPIO_MODE_INPUT;
+          c.pull_up_en = GPIO_PULLUP_ENABLE;
+          c.intr_type = GPIO_INTR_ANYEDGE;
+          gpio_config(&c);
+          gpio_install_isr_service(0);
+          gpio_isr_handler_add(GPIO_NUM_4, [](void *) {
+            int64_t now = esp_timer_get_time();
+            int64_t d = now - id(win_last_edge);
+            id(win_last_edge) = now;
+            id(win_edges)++;
+            if (d >= 2 && d < 256) id(win_hist)[d]++;
+          }, nullptr);
+
+globals:
+  - id: win_last_edge
+    type: int64_t
+    initial_value: "0"
+  - id: win_edges
+    type: uint32_t
+    initial_value: "0"
+  - id: win_hist
+    type: std::array<uint32_t, 256>
+
+esp32:
+  board: seeed_xiao_esp32c3
+  variant: esp32c3
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+  hardware_uart: USB_SERIAL_JTAG
+  logs:
+    sensor: WARN
+    text_sensor: WARN
+    select: WARN
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+uart:
+  - id: acu_rx
+    rx_pin:
+      number: GPIO20
+      mode:
+        input: true
+        pullup: true
+    baud_rate: ${default_baud}
+    rx_buffer_size: 4096
+    debug:
+      direction: RX
+      dummy_receiver: true
+      after:
+        bytes: 96
+        timeout: 4ms
+      sequence:
+        - lambda: ESP_LOGI("ACU>", "%s", format_hex_pretty(bytes).c_str());
+  - id: mod_rx
+    rx_pin:
+      number: GPIO21
+      mode:
+        input: true
+        pullup: true
+    baud_rate: ${default_baud}
+    rx_buffer_size: 4096
+    debug:
+      direction: RX
+      dummy_receiver: true
+      after:
+        bytes: 96
+        timeout: 4ms
+      sequence:
+        - lambda: ESP_LOGI("MOD>", "%s", format_hex_pretty(bytes).c_str());
+
+select:
+  - platform: template
+    id: bus_baud
+    name: "Capture baud"
+    icon: mdi:speedometer
+    optimistic: true
+    restore_value: false
+    options: ["9600", "14400", "19200", "38400", "57600", "76800", "115200", "230400", "250000", "460800"]
+    initial_option: ${default_baud}
+    set_action:
+      - lambda: |-
+          uint32_t b = atoi(x.c_str());
+          id(acu_rx).set_baud_rate(b); id(acu_rx).load_settings(false);
+          id(mod_rx).set_baud_rate(b); id(mod_rx).load_settings(false);
+          ESP_LOGW("win", "baud -> %u", b);
+  - platform: template
+    id: bus_parity
+    name: "Capture parity"
+    optimistic: true
+    restore_value: false
+    options: ["NONE", "EVEN", "ODD"]
+    initial_option: "NONE"
+    set_action:
+      - lambda: |-
+          auto p = x == "EVEN" ? uart::UART_CONFIG_PARITY_EVEN
+                 : x == "ODD"  ? uart::UART_CONFIG_PARITY_ODD
+                               : uart::UART_CONFIG_PARITY_NONE;
+          id(acu_rx).set_parity(p); id(acu_rx).load_settings(false);
+          id(mod_rx).set_parity(p); id(mod_rx).load_settings(false);
+          ESP_LOGW("win", "parity -> %s", x.c_str());
+
+sensor:
+  - platform: template
+    id: bit_time
+    name: "Bus bit time"
+    unit_of_measurement: "us"
+    accuracy_decimals: 0
+    update_interval: never
+  - platform: template
+    id: est_baud
+    name: "Bus estimated baud"
+    unit_of_measurement: "Bd"
+    accuracy_decimals: 0
+    update_interval: never
+  - platform: template
+    id: edge_rate
+    name: "Bus edges per second"
+    unit_of_measurement: "/s"
+    accuracy_decimals: 0
+    update_interval: never
+  - platform: wifi_signal
+    name: "WiFi signal"
+    update_interval: 60s
+
+interval:
+  - interval: 5s
+    then:
+      - lambda: |-
+          uint32_t edges = id(win_edges); id(win_edges) = 0;
+          uint32_t h[256];
+          for (int i = 0; i < 256; i++) { h[i] = id(win_hist)[i]; id(win_hist)[i] = 0; }
+          id(edge_rate).publish_state(edges / 5.0f);
+          // Smallest interval that recurs (>=3 hits counting its neighbour) is one bit.
+          for (int i = 2; i < 255; i++) {
+            if (h[i] + h[i + 1] >= 3) {
+              float t = (i * h[i] + (i + 1) * h[i + 1]) / float(h[i] + h[i + 1]);
+              id(bit_time).publish_state(t);
+              id(est_baud).publish_state(1e6f / t);
+              ESP_LOGW("win", "edges=%u bit~%.1fus baud~%.0f", edges, t, 1e6f / t);
+              return;
+            }
+          }
+          if (edges) ESP_LOGW("win", "edges=%u, no stable bit time (<4 kBd or >500 kBd?)", edges);
+
+binary_sensor:
+  - platform: status
+    name: "Status"
+
+button:
+  - platform: restart
+    name: "Restart"
+    entity_category: diagnostic

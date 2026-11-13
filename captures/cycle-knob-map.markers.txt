@@ -1,0 +1,15 @@
+01:00:38Z cycle Heavy Duty
+01:00:45Z cycle Whites
+01:00:53Z cycle Sanitize
+01:01:01Z cycle Towels
+01:01:11Z cycle Bulky
+01:01:17Z cycle Custom
+01:01:32Z cycle Timed Dry
+01:01:42Z cycle Normal
+01:01:50Z cycle Steam Refresh
+01:01:58Z cycle Wrinkle Control
+01:02:05Z cycle Delicates
+01:02:50Z dryness Less; 01:02:58Z dryness Normal, before raw sensor flash
+01:03:04Z dryness More, before raw sensor flash
+01:05:47Z dryness More
+01:05:51Z dryness Less

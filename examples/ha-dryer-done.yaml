@@ -1,0 +1,14 @@
+# Example Home Assistant automation: notify when the dryer finishes.
+# Entity ids assume the ESPHome device name "maytag-win-sniffer"; adjust to yours.
+alias: Dryer done
+triggers:
+  - trigger: state
+    entity_id: sensor.maytag_win_sniffer_dryer_state
+    from: Running
+    to: Complete
+actions:
+  - action: notify.notify
+    data:
+      title: Dryer
+      message: The dryer is done.
+mode: single
